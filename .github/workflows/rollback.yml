@@ -1,0 +1,106 @@
+name: Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment (staging|production)"
+        required: true
+        default: "staging"
+        type: choice
+        options:
+          - staging
+          - production
+      image_tag:
+        description: "Image tag to roll back to (git SHA short, e.g. abc1234). Leave blank for previous task definition."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION || 'us-east-1' }}
+  ECR_REPOSITORY: nemoclaw
+
+jobs:
+  rollback:
+    name: Rollback ${{ github.event.inputs.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set cluster/service names
+        id: env-config
+        run: |
+          ENV="${{ github.event.inputs.environment }}"
+          echo "cluster=nemoclaw-${ENV}" >> "$GITHUB_OUTPUT"
+          echo "service=nemoclaw-${ENV}-svc" >> "$GITHUB_OUTPUT"
+          echo "task_family=nemoclaw-${ENV}" >> "$GITHUB_OUTPUT"
+
+      - name: Rollback via image tag
+        if: github.event.inputs.image_tag != ''
+        run: |
+          chmod +x scripts/rollback.sh
+          ./scripts/rollback.sh \
+            "${{ steps.env-config.outputs.cluster }}" \
+            "${{ steps.env-config.outputs.service }}" \
+            "${{ steps.env-config.outputs.task_family }}" \
+            "${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.event.inputs.image_tag }}"
+
+      - name: Rollback to previous task definition revision
+        if: github.event.inputs.image_tag == ''
+        run: |
+          FAMILY="${{ steps.env-config.outputs.task_family }}"
+          CLUSTER="${{ steps.env-config.outputs.cluster }}"
+          SERVICE="${{ steps.env-config.outputs.service }}"
+
+          # Get current revision
+          CURRENT=$(aws ecs describe-services \
+            --cluster "$CLUSTER" \
+            --services "$SERVICE" \
+            --query 'services[0].taskDefinition' \
+            --output text)
+          CURRENT_REV=$(echo "$CURRENT" | grep -o '[0-9]*$')
+
+          # Previous revision
+          PREV_REV=$((CURRENT_REV - 1))
+          PREV_TD="${FAMILY}:${PREV_REV}"
+
+          echo "⏪ Rolling back from revision ${CURRENT_REV} to ${PREV_REV}"
+
+          aws ecs update-service \
+            --cluster "$CLUSTER" \
+            --service "$SERVICE" \
+            --task-definition "$PREV_TD" \
+            --force-new-deployment
+
+          aws ecs wait services-stable \
+            --cluster "$CLUSTER" \
+            --services "$SERVICE"
+
+          echo "✅ Rollback to ${PREV_TD} complete"
+
+      - name: Notify Slack
+        if: always()
+        uses: slackapi/slack-github-action@v1.27.0
+        with:
+          payload: |
+            {
+              "text": "${{ job.status == 'success' && '⏪ Rollback succeeded' || '❌ Rollback FAILED' }}\nEnvironment: `${{ github.event.inputs.environment }}`\nTarget tag: `${{ github.event.inputs.image_tag || 'previous revision' }}`\nBy: ${{ github.actor }}"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

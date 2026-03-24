@@ -1,0 +1,29 @@
+version: "3.9"
+
+services:
+  nemoclaw:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nemoclaw:local
+    container_name: nemoclaw-local
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      - NEMOCLAW_ENV=local
+      - NEMOCLAW_NON_INTERACTIVE=1
+      - PORT=3000
+    volumes:
+      - nemoclaw-workspace:/app/workspace
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  nemoclaw-workspace:
