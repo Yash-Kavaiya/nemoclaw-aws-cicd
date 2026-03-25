@@ -67,15 +67,12 @@ jobs:
           CLUSTER="${{ steps.env-config.outputs.cluster }}"
           SERVICE="${{ steps.env-config.outputs.service }}"
 
-          # Get current revision
           CURRENT=$(aws ecs describe-services \
             --cluster "$CLUSTER" \
             --services "$SERVICE" \
             --query 'services[0].taskDefinition' \
             --output text)
           CURRENT_REV=$(echo "$CURRENT" | grep -o '[0-9]*$')
-
-          # Previous revision
           PREV_REV=$((CURRENT_REV - 1))
           PREV_TD="${FAMILY}:${PREV_REV}"
 
@@ -92,15 +89,3 @@ jobs:
             --services "$SERVICE"
 
           echo "✅ Rollback to ${PREV_TD} complete"
-
-      - name: Notify Slack
-        if: always() && env.SLACK_WEBHOOK_URL != ''
-        uses: slackapi/slack-github-action@v1.27.0
-        with:
-          payload: |
-            {
-              "text": "${{ job.status == 'success' && '⏪ Rollback succeeded' || '❌ Rollback FAILED' }}\nEnvironment: `${{ github.event.inputs.environment }}`\nTarget tag: `${{ github.event.inputs.image_tag || 'previous revision' }}`\nBy: ${{ github.actor }}"
-            }
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
